@@ -1,7 +1,62 @@
-# Quad-gradient M0: read-only feasibility probe
+# Quad-gradient: AES / Functional-TC prototype
 
-This is **not** an optimizer, `run.sh`, or a successful contest submission.
-Only M0 of `research/quad_gradient/implementation_spec.md` is in scope.
+`run.sh` implements the M1–M4 sizing prototype from
+`research/quad_gradient/implementation_spec.md`. Implementation, validation and
+runtime-adjusted contest benefit are separate claims: consult the latest results
+report, not the existence of an output file. Deferred tag compatibility is **not
+proven**. The historical `m0.py` remains a separate read-only interface probe.
+
+## Optimizer
+
+Run inside the prescribed container, after activating the environment:
+
+```bash
+python3 evaluator/run_submission.py aes .runs/quad-gradient-NEW -- \
+  bash /workspace/ISPD27-Contest/tools/quad_gradient/run.sh
+```
+
+The launcher appends `<input_dir> <platform_dir> <output_dir> <top_module>`.
+Only AES/ASAP7 is supported. The tool creates a fresh routed R0 and runs at most
+two accepted K=1 iterations (three attempts per iteration).
+`optimizer.py --help` exposes a 1–4 step bound. The normalized-loss improvement
+tolerance remains `1e-7`, the floor used by the completed development validation.
+There is no repeated noise measurement or independent-validation CLI option.
+
+Evidence lives under `tool/quad_gradient`: `manifest.json`, `commands.json`,
+`frozen_plan.json` (optimization parameters and assumptions), `updates.json`,
+raw native arc/path/SPEF/snapshot reports, and complete certified physical
+checkpoints. Every candidate still needs real improvement and fresh-route MCMM
+guards. Rejected trials retain the current checkpoint reference. No accepted
+improvement also fails rather than copying R0. Final public launcher evaluation
+must certify runtime and the exported pair; scoring is then separate:
+
+```bash
+python3 evaluator/score.py --help
+```
+
+Approximation: native path-union states pooled across tags, wire delay fixed,
+wire slew slope 1 with native offset, Ceff load slope 1, waveform correction
+slope 0; clock slew is fixed until each accepted fresh-route refresh. NLDM
+Jacobians use the current environment once; candidate cap is a true discrete
+difference. Negative/zero arrivals use an absolute relative AveSmooth
+neighborhood. Setup data-slew derivatives retain their sign. These assumptions
+remain model limitations despite the completed development validation.
+Drive trials legalize but retain old SPEF for the proxy: displacement and proxy
+ERC/hold are recorded separately, **not** claimed as fresh-route validation.
+Actual acceptance requires fresh route, parasitics, formal, placement,
+clock/protection checks, all-scene hold penalties and ERC, and zero overflow.
+Rollback retains the complete last accepted checkpoint, never only the master.
+
+One-time persistence/reload experiments, independent ranking comparisons,
+deliberate rollback controls, local finite-difference self-checks and a final
+gradient rebuild have been removed from formal optimization. Numerical and
+runtime acceptance/rollback regression checks live in `test_optimizer.py`.
+The retained M1–M4 results describe the historical validation run, including its
+validation overhead; they are not performance measurements of this shorter flow.
+
+## Historical M0 probe
+
+The following describes `m0.py`, not the optimizer.
 No evaluator, scoring, constraints, libraries, or container configuration is changed.
 The probe runs a separate OpenROAD process, loads a certified unchanged AES R0
 DEF and its three routed SPEFs, and preserves the original functional modes,
@@ -117,7 +172,7 @@ an unconditional flag. Omitting the closure plan leaves all three new checks
 unpassed. Native interface sources are hashed alongside the executable.
 The legal tagged-relation check is still unpassed; a different timer, backend
 patch or broader algorithm requires the separate route decision in the spec.
-No M1–M4 work is performed.
+No M1–M4 work is performed by `m0.py`; use the optimizer above for those stages.
 
 ## Tests
 
