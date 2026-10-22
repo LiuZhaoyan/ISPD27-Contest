@@ -2,12 +2,10 @@
 import csv
 import fnmatch
 import re
+from dataclasses import dataclass
 from pathlib import Path
-import sys
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / 'evaluator'))
-from internal import legality
+from data_io import ROOT, legality
 
 VT = {'SL': 0, 'L': 1, 'R': 2}
 DIRECTIONS = ('drive_down', 'drive_up', 'vt_down', 'vt_up')
@@ -26,23 +24,33 @@ def forbidden(master):
                ('*x1p*_ASAP7*', '*xp*_ASAP7*', 'SDF*', 'ICG*'))
 
 
-def enumerate_actions(prefix, views, group_file=None):
-    """Return four decisions per instance, including explicit invalid reasons.
+@dataclass
+class ActionCatalog:
+    """Fixed technology: official groups and pin semantics, loaded once per worker."""
+    library: dict
+    groups: dict
 
-    views is master -> list of real loaded views; requires LEF + BC/TC/WC.
-    Functional/PG/footprint policy is checked again by the public evaluator.
+    @classmethod
+    def load(cls, library_path, group_file=None):
+        library = legality.read_library(str(library_path))
+        group_file = group_file or ROOT / 'evaluator/third_party/displacement/asap7_equivalent_cell_list.csv'
+        groups = {}
+        with Path(group_file).open() as stream:
+            for number, group in enumerate(csv.reader(stream)):
+                for cell in group:
+                    if cell in groups:
+                        raise ValueError('Duplicate official equivalence member: ' + cell)
+                    groups[cell] = (number, group)
+        return cls(library, groups)
+
+
+def enumerate_actions(design, catalog):
+    """Four decisions per instance; nearest legal drive/VT neighbor, no I/O.
+
+    design.views requires LEF + BC/TC/WC. Functional/PG/footprint policy is
+    checked again by the public evaluator.
     """
-    prefix = str(prefix)
-    library = legality.read_library(prefix + '.library.tsv')
-    design = legality.Design(prefix, library)
-    group_file = group_file or ROOT / 'evaluator/third_party/displacement/asap7_equivalent_cell_list.csv'
-    groups = {}
-    with Path(group_file).open() as stream:
-        for number, group in enumerate(csv.reader(stream)):
-            for cell in group:
-                if cell in groups:
-                    raise ValueError('Duplicate official equivalence member: ' + cell)
-                groups[cell] = (number, group)
+    library, groups, views = catalog.library, catalog.groups, design.views
     result = []
     for name, cell in sorted(design.cells.items()):
         current = cell['master']

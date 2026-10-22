@@ -2,6 +2,10 @@
 set root $::env(QG_ROOT)
 set baseline $::env(QG_BASELINE)
 set output $::env(QG_OUTPUT)
+set initialize [expr {[info exists ::env(QG_INITIALIZE)] && $::env(QG_INITIALIZE)}]
+set route [expr {[info exists ::env(QG_ROUTE)] && $::env(QG_ROUTE)}]
+set modifying [expr {[info exists ::env(QG_ACTION)] && $::env(QG_ACTION) ne ""}]
+source [file join $root evaluator internal legality_snapshot.tcl]
 set ::env(PLATFORM_DIR) [file join $root platform asap7]
 source $::env(MCMM_CONFIG)
 set_thread_count 8
@@ -11,7 +15,9 @@ foreach lef {asap7_tech_1x_201209.lef asap7sc7p5t_28_R_1x_220121a.lef asap7sc7p5
     read_lef [file join $::env(PLATFORM_DIR) lef $lef]
 }
 foreach scene {TC BC WC} { foreach lib $corner_libs($scene) { read_liberty $lib } }
-read_def [file join $baseline evaluated.def]
+if {$initialize} { read_def [file join $baseline input.def] } else {
+    read_def [file join $baseline evaluated.def]
+}
 foreach scene {TC BC WC} {
     set mode $scenario_mode($scene)
     read_sdc -mode $mode $scenario_sdc($scene)
@@ -19,12 +25,27 @@ foreach scene {TC BC WC} {
     foreach clk [all_clocks] {
         if {![get_property $clk is_virtual]} { set_propagated_clock $clk }
     }
-    read_spef -name rc_$scene [file join $baseline parasitics_${scene}.spef]
-    define_scene $scene -mode $mode -liberty $corner_libs($scene) -spef rc_$scene
+    if {$initialize || $route || $modifying} {
+        define_scene $scene -mode $mode -liberty $corner_libs($scene)
+    } else {
+        read_spef -name rc_$scene [file join $baseline parasitics_${scene}.spef]
+        define_scene $scene -mode $mode -liberty $corner_libs($scene) -spef rc_$scene
+        report_parasitic_annotation -name rc_$scene -report_unannotated > [file join $output ${scene}_parasitic_annotation.rpt]
+    }
 }
 set_scene TC
 source [file join $::env(PLATFORM_DIR) util setRC.tcl]
-source [file join $root evaluator internal legality_snapshot.tcl]
+legality_snapshot [file join $output before] 1
+# DEF does not preserve dont_touch: restore protection on every load.
+foreach net [[ord::get_db_block] getNets] {
+        if {[$net getSigType] ne "CLOCK"} { continue }
+        $net setDoNotTouch true
+        foreach pin [$net getITerms] {
+            set inst [$pin getInst]
+            $inst setPlacementStatus FIRM
+            $inst setDoNotTouch true
+        }
+}
 proc row {fp args} { puts $fp [join $args \t] }
 proc table {name fields} {
     set f [open [file join $::output $name] w]
@@ -40,32 +61,88 @@ proc rf {edge} {
     if {$edge eq "v"} {return fall}
     return $edge
 }
-if {[info exists ::env(QG_ACTION)] && $::env(QG_ACTION) ne ""} {
+# Apply before routing in the same disposable process; neither stage loads old SPEFs.
+if {$modifying} {
     set f [open $::env(QG_ACTION) r]
-    lassign [split [string trim [read $f]] \t] name target
-    close $f
-    set inst [[ord::get_db_block] findInst $name]
-    set old_master [$inst getMaster]
-    set target_master [[ord::get_db] findMaster $target]
-    if {$target_master eq "NULL"} { error "Missing target OpenDB master" }
+    set replacements [dict create]
+    set legalize 0
     set geometry [table geometry.tsv {instance before_width before_height after_width after_height legalized}]
-    row $geometry $name [$old_master getWidth] [$old_master getHeight] [$target_master getWidth] [$target_master getHeight] $::env(QG_LEGALIZE)
+    while {[gets $f line] >= 0} {
+        if {[llength [split $line \t]] != 2} { error "Malformed batch action" }
+        lassign [split $line \t] name target
+        if {$name eq "" || $target eq "" || [dict exists $replacements $name]} {
+            error "Empty or duplicate batch instance"
+        }
+        set inst [[ord::get_db_block] findInst $name]
+        set target_master [[ord::get_db] findMaster $target]
+        if {$inst eq "NULL" || $target_master eq "NULL"} { error "Missing batch instance or master" }
+        if {[$inst isDoNotTouch] || [$inst getPlacementStatus] in {FIRM LOCKED}} {
+            error "Protected batch instance: $name"
+        }
+        set old_master [$inst getMaster]
+        set moved [expr {[$old_master getWidth] != [$target_master getWidth] || [$old_master getHeight] != [$target_master getHeight]}]
+        if {$moved} { set legalize 1 }
+        row $geometry $name [$old_master getWidth] [$old_master getHeight] [$target_master getWidth] [$target_master getHeight] $moved
+        dict set replacements $name $target
+    }
+    close $f
     close $geometry
-    if {!$::env(QG_LEGALIZE) && ([$old_master getWidth] != [$target_master getWidth] || [$old_master getHeight] != [$target_master getHeight])} {
-        error "VT footprint mismatch"
+    # One transaction in a disposable process, including best-state freeze restores.
+    dict for {name target} $replacements {
+        replace_cell [get_cells $name] $target
+        set inst [[ord::get_db_block] findInst $name]
+        if {[[$inst getMaster] getName] ne $target || [get_property [get_cells $name] ref_name] ne $target} {
+            error "STA/OpenDB replacement mismatch"
+        }
     }
-    replace_cell [get_cells $name] $target
-    set inst [[ord::get_db_block] findInst $name]
-    if {[[$inst getMaster] getName] ne $target || [get_property [get_cells $name] ref_name] ne $target} {
-        error "STA/OpenDB replacement mismatch"
-    }
-    # Same-footprint VT needs no motion; drive trials always legalize.
-    if {$::env(QG_LEGALIZE)} { detailed_placement }
+    if {$legalize} { detailed_placement }
+}
+if {$initialize || $route} {
+    if {[[ord::get_db_block] getName] ne $::env(QG_TOP)} { error "Top module mismatch" }
+    set_dont_use {*x1p*_ASAP7* *xp*_ASAP7* SDF* ICG*}
     check_placement -verbose
-    write_def [file join $output candidate.def]
-    write_verilog [file join $output candidate.v]
+    # B is both apply-after and route-before. Keep evaluated.def/v pre-route,
+    # and export the library catalog only with A (before).
+    if {$modifying} {
+        legality_snapshot [file join $output evaluated]
+    } else {
+        write_def [file join $output evaluated.def]
+    }
+    write_verilog [file join $output evaluated.v]
+    # Same physical setup as the public R0, but no proofs, full metric extraction
+    # or clean verification subprocesses. Initial STA is the subsequent probe.
+    set_routing_layers -signal M2-M7 -clock M4-M7
+    set_global_routing_layer_adjustment * 0.25
+    set_global_routing_random -seed 42
+    global_route -allow_congestion -congestion_iterations 30 \
+        -congestion_report_file [file join $output congestion.rpt]
+    estimate_parasitics -global_routing -spef_file [file join $output parasitics.spef]
+    legality_snapshot [file join $output snapshot]
+    # Preserve per-layer overflow, without offsetting it by spare capacity.
+    set grid [[ord::get_db_block] getGCellGrid]
+    if {$grid eq "NULL" || ![llength [$grid getGridX]] || ![llength [$grid getGridY]]} {
+        error "Missing routing grid"
+    }
+    set total 0; set peak 0
+    foreach layer [[ord::get_db_tech] getLayers] {
+        if {[$layer getRoutingLevel] <= 0} { continue }
+        for {set x 0} {$x < [llength [$grid getGridX]]} {incr x} {
+            for {set y 0} {$y < [llength [$grid getGridY]]} {incr y} {
+                set over [expr {max(0,[$grid getUsage $layer $x $y]-[$grid getCapacity $layer $x $y])}]
+                incr total $over
+                set peak [expr {max($peak,$over)}]
+            }
+        }
+    }
+    set fp [open [file join $output overflow.tsv] w]
+    puts $fp "total\tmax"
+    puts $fp "$total\t$peak"
+    close $fp
+    puts QG_INITIALIZATION_COMPLETE
+    exit
 }
 legality_snapshot [file join $output snapshot] 1
+write_verilog [file join $output loaded.v]
 set views [table views.tsv {master view}]
 foreach scene {TC BC WC} {
     foreach lib $corner_libs($scene) {

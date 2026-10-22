@@ -1,4 +1,4 @@
-"""TC path-union adjoint prototype. SI-facing reports converted to ps/fF here.
+"""TC path-union working-point model. SI-facing reports converted to ps/fF here.
 
 Tag pooling and fixed wire-delay/waveform-offset Jacobians are approximations,
 not a replacement timer. Accurate acceptance always uses OpenSTA/evaluator.
@@ -10,7 +10,9 @@ import math
 from pathlib import Path
 import re
 
-from m0 import groups, attribute, condition, NUMBER, rows
+import torch
+
+from data_io import groups, attribute, condition, NUMBER
 
 
 def lookup(table, x, y):
@@ -30,9 +32,12 @@ def lookup(table, x, y):
 
 
 class Library:
+    """Immutable TT data and per-instance caches, reusable across native refreshes."""
+
     def __init__(self, folder):
+        self.folder = Path(folder).resolve()
         self.cells = {}
-        for path in sorted(Path(folder).glob('*TT*lib*')):
+        for path in sorted(self.folder.glob('*TT*lib*')):
             text = gzip.open(path, 'rt').read() if path.suffix == '.gz' else path.read_text()
             if attribute(text, 'time_unit') != '1ps' or not re.search(r'capacitive_load_unit\s*\(\s*1\s*,\s*ff\s*\)', text):
                 raise ValueError('Unsupported Liberty units')
@@ -41,13 +46,29 @@ class Library:
                     raise ValueError('Duplicate TT cell: ' + name)
                 self.cells[name] = dict(groups(body, 'pin'))
         self.cache = {}
+        self._cap_cache = {}
+
+    def verify_folder(self, folder):
+        """Bind the parsed library to its directory; do not reread/hash sources.
+
+        Callers keep this directory immutable for the run. Reload Library
+        explicitly to use files that were changed in place.
+        """
+        if Path(folder).resolve() != self.folder:
+            raise ValueError('Library directory does not match libdir')
 
     def cap(self, cell, pin, transition):
-        body = self.cells[cell][pin]
-        value = attribute(body, transition + '_capacitance', attribute(body, 'capacitance'))
-        if value is None:
-            raise ValueError('Missing input capacitance')
-        return float(value)
+        key = (cell, pin, transition)
+        if key not in self._cap_cache:
+            body = self.cells[cell][pin]
+            value = attribute(body, transition + '_capacitance')
+            if value is None:
+                value = attribute(body, 'capacitance')
+            if value is None:
+                raise ValueError('Missing input capacitance')
+            # Failed/missing queries are not cached. Each Library owns its cache.
+            self._cap_cache[key] = float(value)
+        return self._cap_cache[key]
 
     def table(self, sample, kind, cell=None):
         cell = cell or sample['liberty_cell']
@@ -97,25 +118,53 @@ def inputs(text, setup=False):
     return result
 
 
-def ave(values, epsilon=0.01):
-    maximum = max(values)
-    # Absolute neighborhood extends the paper rule to zero/negative arrivals.
-    active = [i for i, value in enumerate(values) if value >= maximum-epsilon*abs(maximum)-1e-12]
-    return [1/len(active) if i in active else 0 for i in range(len(values))]
+def validate_axes(table):
+    if any(len(axis) < 2 or any(b <= a for a, b in zip(axis, axis[1:])) for axis in table[0]):
+        raise ValueError('Invalid NLDM axes')
 
 
-def tc_loss(native, reference, epsilon=1e-9):
-    tns, wns = native
-    rt, rw = reference
-    return -tns/abs(rt+epsilon) + max(0., -wns)/abs(rw+epsilon)
+def lookup_values(queries, points):
+    """Batch NLDM tables of equal shape; select the right interval at knots."""
+    groups = defaultdict(list)
+    for i, (table, _, _) in enumerate(queries):
+        axes, matrix = table
+        validate_axes(table)
+        groups[(len(axes[0]), len(axes[1]))].append(i)
+    result = torch.zeros(len(queries), dtype=torch.float64, device=points.device)
+    for indices in groups.values():
+        ix = torch.tensor(indices, device=points.device)
+        xaxis = points.new_tensor([queries[i][0][0][0] for i in indices])
+        yaxis = points.new_tensor([queries[i][0][0][1] for i in indices])
+        tables = points.new_tensor([queries[i][0][1] for i in indices])
+        xy = points[ix]
+        x, y = xy[:, 0].contiguous(), xy[:, 1].contiguous()
+        i = (torch.searchsorted(xaxis, x[:, None], right=True)[:, 0]-1).clamp(0, xaxis.shape[1]-2)
+        j = (torch.searchsorted(yaxis, y[:, None], right=True)[:, 0]-1).clamp(0, yaxis.shape[1]-2)
+        row = torch.arange(len(indices), device=points.device)
+        u = (x-xaxis[row, i])/(xaxis[row, i+1]-xaxis[row, i])
+        v = (y-yaxis[row, j])/(yaxis[row, j+1]-yaxis[row, j])
+        a, b = tables[row, i, j], tables[row, i+1, j]
+        c, d = tables[row, i, j+1], tables[row, i+1, j+1]
+        values = (1-u)*(1-v)*a + u*(1-v)*b + (1-u)*v*c + u*v*d
+        result = result.index_copy(0, ix, values)
+    return result
 
 
-class Adjoint:
-    def __init__(self, folder, library, reference):
-        self.folder, self.library, self.reference = Path(folder), library, reference
+def lookup_many(queries, device='cpu'):
+    if not queries:
+        return []
+    points = torch.tensor([(x, y) for _, x, y in queries], dtype=torch.float64,
+                          device=device, requires_grad=True)
+    values = lookup_values(queries, points)
+    partials, = torch.autograd.grad(values.sum(), points)
+    return torch.cat((values[:, None], partials), dim=1).detach().cpu().tolist()
+
+
+class TimingModel:
+    def __init__(self, timing_data, design, library):
         self.nodes = {}
         paths = defaultdict(list)
-        for r in rows(self.folder/'paths.tsv'):
+        for r in timing_data.paths:
             key = (r['pin'], r['transition'])
             arrival, slew = float(r['arrival_ps']), float(r['slew_ps'])
             if not all(math.isfinite(v) for v in (arrival, slew)):
@@ -134,12 +183,15 @@ class Adjoint:
             self.edges.append(dict(a=a, b=b, delay=self.nodes[b][0]-self.nodes[a][0],
                                    slew=self.nodes[b][1], ds=0., dc=0., ss=1., sc=0., sample=None))
         self.checks = defaultdict(list)
-        for sample in rows(self.folder/'arcs.tsv'):
+        queries, setup_queries = [], []
+        for sample in timing_data.arcs:
             a = (sample['from_pin'], sample['from_transition'])
             b = (sample['to_pin'], sample['to_transition'])
+            # Own inclusion and launch-boundary expansion in this traversal.
+            # Off-union arcs may have no report, so request it only after filtering.
             if b not in self.nodes:
                 continue
-            text = (self.folder/sample['report_file']).read_text()
+            text = timing_data.read_report(sample)
             x, y = inputs(text, sample['kind'] == 'setup')
             if a not in self.nodes and sample['kind'] != 'setup':
                 if sample['role'] != 'Reg Clk to Q':
@@ -149,19 +201,29 @@ class Adjoint:
                 self.nodes[a] = (self.nodes[b][0]-float(sample['graph_delay_s'])*1e12, x)
             if sample['kind'] == 'setup':
                 kind = ('rise' if b[1] == 'rise' else 'fall') + '_constraint'
-                _, ds, _ = lookup(library.table(sample, kind), x, y)
-                self.checks[b].append((ds, sample, x, y))
+                setup_queries.append((b, sample, x, y, len(queries)))
+                queries.append((library.table(sample, kind), x, y))
             else:
                 dk = 'cell_' + b[1]
                 sk = b[1] + '_transition'
                 dt, st = library.table(sample, dk), library.table(sample, sk)
-                delay, ds, dc = lookup(dt, x, y)
-                slew, ss, sc = lookup(st, x, y)
                 waveform = re.search(r'Driver waveform slew = (' + NUMBER + ')', text)
                 self.edges.append(dict(a=a, b=b, delay=float(sample['graph_delay_s'])*1e12,
-                                       slew=float(waveform[1]) if waveform else slew,
-                                       ds=ds, dc=dc, ss=ss, sc=sc, sample=sample, x=x, y=y,
-                                       delay_kind=dk, slew_kind=sk, delay_lut=delay, slew_lut=slew))
+                                       slew=float(waveform[1]) if waveform else None,
+                                       sample=sample, x=x, y=y, query=len(queries),
+                                       delay_kind=dk, slew_kind=sk))
+                queries.extend(((dt, x, y), (st, x, y)))
+        values = lookup_many(queries)
+        for b, sample, x, y, query in setup_queries:
+            self.checks[b].append((values[query][1], sample, x, y))
+        for e in self.edges:
+            if e['sample'] is not None:
+                query = e.pop('query')
+                delay, ds, dc = values[query]
+                slew, ss, sc = values[query+1]
+                e.update(delay_lut=delay, ds=ds, dc=dc, slew_lut=slew, ss=ss, sc=sc)
+                if e['slew'] is None:
+                    e['slew'] = slew
         self.incoming = defaultdict(list)
         successors = defaultdict(set)
         indegree = dict.fromkeys(self.nodes, 0)
@@ -185,41 +247,8 @@ class Adjoint:
         for path in paths.values():
             node, slack, endpoint = path[-1]
             endpoint_states[endpoint][node] = min(endpoint_states[endpoint].get(node, math.inf), slack)
-        self.ga, self.gs = defaultdict(float), defaultdict(float)
-        worst = min(v for states in endpoint_states.values() for v in states.values())
-        worst_endpoints = [ep for ep, states in endpoint_states.items() if abs(min(states.values())-worst)<=1e-6]
-        for ep, states in endpoint_states.items():
-            minimum = min(states.values())
-            active = [n for n, s in states.items() if abs(s-minimum)<=1e-6]
-            seed = (1/(1000*abs(reference[0]+1e-9)) if minimum < 0 else 0)
-            if ep in worst_endpoints and worst < 0:
-                seed += 1/(1000*abs(reference[1]+1e-9)*len(worst_endpoints))
-            for node in active:
-                self.ga[node] += seed/len(active)
-                checks = self.checks[node]
-                if checks:
-                    # Ambiguous clock/conditional checks are not silently averaged.
-                    if len(checks) != 1:
-                        raise ValueError('Nonunique setup seed at ' + str(node))
-                    self.gs[node] += seed/len(active)*checks[0][0]
-                elif '/' in node[0]:
-                    raise ValueError('Missing setup data-slew seed at ' + str(node))
-        self.load = defaultdict(float)
-        self.edge_adjoint = {}
-        for node in reversed(self.order):
-            indices = self.incoming[node]
-            if not indices:
-                continue
-            aw = ave([self.nodes[self.edges[i]['a']][0]+self.edges[i]['delay'] for i in indices])
-            sw = ave([self.edges[i]['slew'] for i in indices])
-            for i, wa, ws in zip(indices, aw, sw):
-                e = self.edges[i]
-                gd, gs = self.ga[node]*wa, self.gs[node]*ws
-                self.edge_adjoint[i] = (gd, gs)
-                self.ga[e['a']] += gd
-                self.gs[e['a']] += gd*e['ds'] + gs*e['ss']
-                self.load[node] += gd*e['dc'] + gs*e['sc']
-        pins = rows(self.folder/'snapshot.pins.tsv')
+        self.endpoint_states = endpoint_states
+        pins = design.pins
         self.drivers = {}
         for r in pins:
             if r['instance'] and r['direction'] == 'OUTPUT':
@@ -233,27 +262,13 @@ class Adjoint:
             if edge['sample'] is not None:
                 self.instance_edges[edge['sample']['to_pin'].rsplit('/',1)[0]].append(i)
 
-    def score(self, action):
-        own = downstream = upstream = 0.
-        for i in self.instance_edges[action['instance']]:
-            e = self.edges[i]
-            s = e['sample']
-            gd, gs = self.edge_adjoint.get(i, (0.,0.))
-            if not (gd or gs):
-                continue
-            d = lookup(self.library.table(s,e['delay_kind'],action['target']),e['x'],e['y'])[0]
-            t = lookup(self.library.table(s,e['slew_kind'],action['target']),e['x'],e['y'])[0]
-            own += gd*(d-e['delay_lut'])
-            downstream += gs*(t-e['slew_lut'])
-        for pin in self.pins[action['instance']]:
-            driver = self.drivers.get(pin['net'])
-            if driver:
-                for transition in ('rise','fall'):
-                    delta = (self.library.cap(action['target'],pin['pin'],transition)-
-                             self.library.cap(action['current'],pin['pin'],transition))
-                    upstream += self.load[(driver,transition)]*delta
-        delta = own+downstream+upstream
-        if not math.isfinite(delta):
-            raise ValueError('Nonfinite action benefit')
-        return dict(action, benefit=-delta,
-                    own_delay=own, upstream_load=upstream, downstream_slew=downstream)
+
+
+def build_timing_model(timing_data, design, library):
+    """Build ps/fF working-point facts; never seed or propagate sensitivities.
+
+    Wire delay is fixed, wire slew derivative is 1, Ceff derivative is 1,
+    and LUT waveform-offset derivative is 0. Clock slew is fixed until the
+    next native refresh; protected launch Q still responds to its output load.
+    """
+    return TimingModel(timing_data, design, library)
