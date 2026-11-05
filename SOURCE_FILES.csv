@@ -1,0 +1,72 @@
+file,group,purpose
+quad/post_cts_workflow.py,Workflow 与入口,主控制器：ERC/hold 修复、sizing/power 批次、稀疏 buffering、GR 校准、WNS 收尾和结果输出。
+quad/run_post_cts.py,Workflow 与入口,竞赛四位置参数适配器，将输入与输出目录交给主 workflow。
+quad/audit_post_cts.py,Workflow 与入口,利用保存的真实参考，测量常驻 MCMM 前向、梯度排序及同拓扑重校准。
+quad/prepare.py,Workflow 与入口,解析三 corner Liberty/LEF，准备 cell catalog、四方向邻居、时序及功耗缓存。
+quad/workflow_policy.py,Workflow 与入口,大小批次预算、冲突/资源筛选、MCMM 验收、局部 ERC 回退、buffer 探测与自适应 GR 检查触发。
+quad/workflow_native.py,Workflow 与入口,常驻 OpenROAD 事务、placement RC、独立 GR endpoint 检查及按需完整校准导出。
+quad/workflow_buffering.py,Workflow 与入口,按 net 组装候选问题，通过线程池并发调用 C++ buffer DP。
+quad/workflow_buffer_dp.cpp,Workflow 与入口,受限 RC 树 buffering 动态规划及 Pareto 剪枝，生成有限候选。
+quad/workflow_sta.py,时序、梯度与校准,连接 placement RC 与 GR 时序标签；保留源点 arrival，按逻辑 pin/arc 对齐重校准并审计误差。
+quad/tagged_arrival.py,时序、梯度与校准,CUDA tagged-arrival 内核的编译、加载、图数据打包及 PyTorch autograd 接口。
+quad/tagged_arrival.cu,时序、梯度与校准,按 level 传播不同 startpoint 的 early/late arrival，并按保存的 predecessor 反向累积梯度。
+quad/workflow_clock.py,时序、梯度与校准,批量计算并缓存 clock-tree LCA，为源点相关的 CRPR 修正提供公共路径。
+quad/autograd_cuda_sta.py,时序、梯度与校准,可微电气 STA；硬前向、Ave/LSE 代理梯度、Liberty LUT 与 RC 的自动反传。
+quad/resident_cuda_sta.py,时序、梯度与校准,常驻 GPU 的 levelized 时序图、LUT 查询、候选动作数据及工作点更新。
+quad/early_cuda_sta.py,时序、梯度与校准,early/min arrival 和 slew 传播，用于 hold 检查。
+quad/gpu_calibration.py,时序、梯度与校准,构建电气 GPU 模型并校准局部 delay/slew；workflow 向此层提供 placement SPEF。
+quad/forward_sta.py,时序、梯度与校准,Liberty 时序表、原生图导出解析、CPU 前向模型和统计工具。
+quad/backward_sta.py,时序、梯度与校准,CPU Ave/LSE VJP、LUT 偏导及 endpoint 种子；也作为 GPU 回归的数值参考。
+quad/cuda_sta.py,时序、梯度与校准,基础 CUDA levelized STA；为常驻引擎提供继承实现和基础算子。
+quad/move_forward_sta.py,时序、梯度与校准,处理换门后的 Liberty conditional-arc 分区，是 ratio 模型的基础类。
+quad/ratio_sta.py,时序、梯度与校准,分层 ratio/offset 校准及其链式导数基础类。
+quad/rc_paper_sta.py,时序、梯度与校准,RC 树负载响应、pin capacitance 和相关导数的基础模型。
+quad/rf_paper_sta.py,时序、梯度与校准,rise/fall 分离的 pin cap、net load 及相关时序基础模型。
+quad/source_group_sta.py,时序、梯度与校准,区分 input、clock rise/fall 源类别，提供共享数据结构和数值对照。
+quad/mcmm_model.py,时序、梯度与校准,按评测器规则加载三 corner timing/check 表，处理缺失场景 arc 的回退。
+quad/wire_thresholds.py,时序、梯度与校准,解析 Liberty 阈值，并计算输入端口线网响应参数。
+quad/workflow_rc.py,Placement RC,读取原生 placement SPEF，按 net 缓存几何，挂接 GPU 树算子并提交 sizing 后的电容变化。
+quad/tree_rc_cuda.py,Placement RC,Euler 区间与前缀和实现线性存储 GPU RC 树求解、矩及其导数。
+quad/placement_gpu_rc.py,Placement RC,将物理线网、pin 电容和外部负载绑定到 GPU 电气模型；树桥接类继承此接口。
+quad/placement_rc.py,Placement RC,提供当前使用的 Pin、Network、read_pins 和 RC moment 数据结构；同文件保留 FLUTE 参考实现及其测试。
+quad/rc_tree.py,Placement RC,解析 SPEF、处理单位与理想连接，求传递电阻和 Elmore 电容灵敏度。
+quad/flute_bridge.cpp,Placement RC,placement_rc.py 中 FLUTE 参考实现的 C ABI 桥接；相关基础回归需要它。
+quad/cell_space.py,单元库与功耗,解析单元功能、LEF 与网表；建立合法 drive-strength/Vt 网格及邻居。
+quad/minmax_caps.py,单元库与功耗,读取 Liberty rise/fall 的 min/max 输入电容范围。
+quad/nlpm.py,单元库与功耗,Liberty internal/switching/leakage 模型及逻辑活动灵敏度；单独缓存 leakage 以加速宽候选资源筛选。
+quad/power_cuda.py,单元库与功耗,在 GPU 上计算功耗及换门差分，提供负载和 slew 的功耗梯度。
+quad/policy.py,单元库与功耗,按竞赛规则生成四近邻或完整合法单元族候选，并提供去重 Top-K 动作筛选。
+quad/sta_server.py,原生接口与导出,OpenROAD 进程通信、设计加载、参考导出、多 worker 调用和 DEF/Verilog 输出的共享接口。
+quad/native_metrics.py,原生接口与导出,解析独立原生 MCMM/ERC 指标，并计算竞赛评分中的目标项。
+quad/native_repair.py,原生接口与导出,生成原生 Resizer 约束修复 Tcl 序列。
+quad/model_runtime.py,原生接口与导出,主流程复用其中 feasible_constraints 检查 hold/ERC/routing；同文件保留共享模型加载辅助函数。
+quad/def_output.py,原生接口与导出,恢复输出 DEF 中原始 GCELLGRID 声明，保持竞赛物理约束。
+quad/workflow_export.tcl,原生接口与导出,轻量 GR endpoint 导出，以及完整 min/max 图、来源标签和 placement RC 导出。
+quad/export_placement_rc.tcl,原生接口与导出,导出 pin 位置和几何信息，不执行 placement 或 CTS。
+quad/export_paper.tcl,原生接口与导出,sta_server 共享参考导出接口：加载基础导出器并补充模型参考数据。
+quad/export_stage48.tcl,原生接口与导出,export_paper.tcl 实际 source 的基础 pin/arc/check 时序图导出器。
+tools/export_analysis_graph.tcl,辅助工具,导出选定场景 min/max pin、arc、endpoint 以及原生时序指标。
+tools/export_source_groups.tcl,辅助工具,从原生 OpenSTA 导出 input/clock-rise/clock-fall 路径来源标签。
+tools/fetch_contest_openroad.py,辅助工具,准备竞赛镜像的 OpenROAD runtime 及其来源记录。
+tools/verify_cts_structure.py,辅助工具,检查 benchmark 转换前后的逻辑连接及允许的 buffer 插入。
+tests/test_workflow.py,项目回归,端到端组件契约：源点队列、反向、CRPR、预算、批次冲突、插入回滚、并行 DP、RC 和重校准。
+tests/test_autograd_sta.py,项目回归,自动梯度与独立数值参考的一致性，覆盖 RC、条件 arc、功耗 VJP 和 CUDA graph。
+tests/test_backward_sta.py,项目回归,基础 LUT 偏导、Ave/LSE、目标种子及重汇聚反向。
+tests/test_forward_sta.py,项目回归,NLDM 插值/外推、arrival/slew 选择、负载更新和 setup 检查。
+tests/test_cell_space.py,项目回归,Liberty/DEF/网表解析、功能等价及合法 drive/Vt 邻居。
+tests/test_condition_cache.py,项目回归,Liberty 条件表达式缓存不改变语义且返回不可变结果。
+tests/test_cts_structure.py,项目回归,benchmark CTS 结构验证器的允许变换和错误拒绝。
+tests/test_early_cuda_sta.py,项目回归,min 时序、early 源类别及共享物理 RC 的边界行为。
+tests/test_feasible_constraints.py,项目回归,hold 容差及 ERC/routing 验收规则。
+tests/test_gpu_binding.py,项目回归,换门和不换门时 GPU 工作点绑定及校准状态。
+tests/test_gpu_roots.py,项目回归,非零 level 的 native root arrival 保持，防止重复添加 offset。
+tests/test_minmax_caps.py,项目回归,Liberty min/max、rise/fall 电容选择。
+tests/test_placement_rc.py,项目回归,物理 RC moment、SPEF round-trip、FLUTE 参考实现和固定时钟几何。
+tests/test_policy.py,项目回归,禁止单元过滤、Top-K 去重与非法候选屏蔽。
+tests/test_power_propagation.py,项目回归,功耗梯度对 slew/load 的传播及有限差分校验。
+tests/test_ratio_nlpm.py,项目回归,ratio 校准链式法则及功耗逻辑概率/灵敏度。
+tests/test_rc_tree.py,项目回归,共享路径电阻、网格求解、理想连接、断连拒绝和 SPEF 单位。
+tests/test_recovery.py,项目回归,recovery check 的负 margin、时钟/数据轴及反向符号。
+tests/test_source_group_sta.py,项目回归,源类别传播、clock 修正及对应反向的数值验证。
+tests/test_tree_rc_cuda.py,项目回归,GPU 树 RC 的电容矩、响应和导数与独立参考对照。
+tests/test_wire_thresholds.py,项目回归,输入端口阈值响应与 early/late 时序的一致性。

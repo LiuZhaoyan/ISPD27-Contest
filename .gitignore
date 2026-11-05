@@ -1,2 +1,13 @@
 __pycache__/
 *.py[cod]
+
+# Optimizer caches, runtime dependencies and experiment artifacts
+/cache/
+/artifacts/
+/runs/
+/reports/
+/tools/contest-runtime/
+/tools/packages/
+/third_party/
+/.venv/
+.pytest_cache/

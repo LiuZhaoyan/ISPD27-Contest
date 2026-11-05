@@ -1,0 +1,4 @@
+# Validated with Python 3.11; install the CUDA-enabled PyTorch build first.
+numpy==1.26.4
+scipy==1.14.0
+torch==2.0.1
